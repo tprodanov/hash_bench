@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{self, Write},
-    time::{Instant, Duration},
+    time::Instant,
     hash::Hasher,
     collections::HashSet,
     path::Path,
@@ -9,7 +9,7 @@ use std::{
 };
 use rand::{
     Rng, SeedableRng,
-    distributions::Alphanumeric,
+    distributions::{Alphanumeric, Standard, Distribution},
 };
 
 /// Returns mean and variance together.
@@ -24,21 +24,16 @@ pub fn mean_variance(a: &[f64]) -> (f64, f64) {
     (mean, var)
 }
 
-// #[inline]
-// fn generate_bytes(rng: &mut impl Rng) -> impl Iterator<Item = u8> + '_ {
-//     Standard.sample_iter(rng).flat_map(|x: u64| x.to_ne_bytes())
-// }
+#[inline]
+fn generate_bytes(rng: &mut impl Rng) -> impl Iterator<Item = u8> + '_ {
+    Standard.sample_iter(rng).flat_map(|x: u64| x.to_ne_bytes())
+}
 
-fn run_hasher<H>(buffer: &[u8], count: usize) -> Duration
-where H: Hasher + Default,
-{
-    let timer = Instant::now();
-    for _ in 0..count {
-        let mut hasher = H::default();
-        hasher.write(black_box(buffer));
-        black_box(hasher.finish());
-    }
-    timer.elapsed()
+#[inline]
+fn calc<H: Hasher + Default>(bytes: &[u8]) -> u64 {
+    let mut hasher = H::default();
+    hasher.write(bytes);
+    hasher.finish()
 }
 
 fn evaluate<H>(
@@ -54,7 +49,11 @@ where H: Hasher + Default,
     let buffer = vec![15; bytes];
     let mut values = Vec::with_capacity(iters);
     for _ in 0..iters {
-        let runtime = run_hasher::<H>(&buffer, count);
+        let timer = Instant::now();
+        for _ in 0..count {
+            black_box(calc::<H>(black_box(&buffer)));
+        }
+        let runtime = timer.elapsed();
         let bandwidth = 1e-6 * (count * bytes) as f64 / runtime.as_secs_f64();
         values.push(bandwidth);
     }
@@ -96,13 +95,47 @@ where H: Hasher + Default,
     let mut set: HashSet<u64, ahash::RandomState> = Default::default();
     for val in 0..count as u64 {
         fill_hex(buffer[affix_range.clone()].iter_mut().rev(), val);
-        let mut hasher = H::default();
-        hasher.write(&buffer);
-        collisions += u64::from(!set.insert(hasher.finish()));
+        collisions += u64::from(!set.insert(calc::<H>(&buffer)));
     }
     writeln!(writer, "{}\t{}\t{}\t{}\t{}\t{}", name, length, affix_range.start, affix_range.end,
         collisions, count)?;
     eprintln!("    -> {:.2} s, {} collisions / {}", timer.elapsed().as_secs_f64(), collisions, count);
+    Ok(())
+}
+
+fn test_randomness<H>(
+    name: &str,
+    rng: &mut impl Rng,
+    count: usize,
+    length: usize,
+    writer: &mut impl Write,
+) -> io::Result<()>
+where H: Hasher + Default,
+{
+    eprintln!("Testing {} for randomness, length {}", name, length);
+    let timer = Instant::now();
+    let mut buffer = vec![0; length];
+    let mut bytes = generate_bytes(rng);
+    let mut matches_count = [0_u64; 64];
+    for _ in 0..count {
+        buffer.iter_mut().for_each(|b| *b = bytes.next().unwrap());
+        let hash0 = calc::<H>(&buffer);
+        for i in 0..length {
+            let b = *unsafe { buffer.get_unchecked(i) };
+            unsafe { *buffer.get_unchecked_mut(i) = b.wrapping_add(1) };
+            let hash = calc::<H>(&buffer);
+            unsafe { *buffer.get_unchecked_mut(i) = b };
+            matches_count[(hash0 ^ hash).count_ones() as usize] += 1;
+        }
+    }
+    // Best number should be 0.5.
+    let randomness = matches_count.into_iter().enumerate()
+        .map(|(i, c)| (i as u64 * c) as f64)
+        .sum::<f64>()
+        / (length * count * 64) as f64;
+    let randomness01 = 1.0 - (2.0 * randomness - 1.0).abs();
+    writeln!(writer, "{}\t{}\t{:.10}", name, length, randomness01)?;
+    eprintln!("    -> {:.2} s, randomness {:.5}", timer.elapsed().as_secs_f64(), randomness01);
     Ok(())
 }
 
@@ -111,6 +144,7 @@ fn test_hasher<H>(
     mut rng: impl Rng,
     writer1: Option<&mut io::BufWriter<fs::File>>,
     writer2: Option<&mut io::BufWriter<fs::File>>,
+    writer3: Option<&mut io::BufWriter<fs::File>>,
 ) -> io::Result<()>
 where H: Hasher + Default,
 {
@@ -136,6 +170,13 @@ where H: Hasher + Default,
             test_collisions::<H>(name, &mut rng, count, size, size - affix..size, writer2)?;
         }
     }
+
+    if let Some(writer3) = writer3 {
+        let count = 2_usize.pow(20);
+        for &size in &[8, 12, 16, 20, 24, 28, 32] {
+            test_randomness::<H>(name, &mut rng, count, size, writer3)?;
+        }
+    }
     eprintln!();
     Ok(())
 }
@@ -148,6 +189,7 @@ fn main() {
 
     let calc_bandwidth = true;
     let calc_collisions = true;
+    let calc_randomness = true;
 
     let mut writer1 = if calc_bandwidth {
         let mut writer = io::BufWriter::new(fs::File::create(out_dir.join("bandwidth.csv")).unwrap());
@@ -158,24 +200,50 @@ fn main() {
     };
     let mut writer2 = if calc_collisions {
         let mut writer = io::BufWriter::new(fs::File::create(out_dir.join("collisions.csv")).unwrap());
-        writeln!(writer, "hasher\tlength\tvar_start\tvar_end\tcollisions\tsize").unwrap();
+        writeln!(writer, "hasher\tbytes\tvar_start\tvar_end\tcollisions\tcount").unwrap();
+        Some(writer)
+    } else {
+        None
+    };
+    let mut writer3 = if calc_randomness {
+        let mut writer = io::BufWriter::new(fs::File::create(out_dir.join("randomness.csv")).unwrap());
+        writeln!(writer, "hasher\tbytes\trandomness").unwrap();
         Some(writer)
     } else {
         None
     };
 
     let rng = rand_xoshiro::Xoshiro256PlusPlus::from_entropy();
-    test_hasher::<siphasher::sip::SipHasher13>("sip13", rng.clone(), writer1.as_mut(), writer2.as_mut()).unwrap();
-    test_hasher::<siphasher::sip::SipHasher24>("sip24", rng.clone(), writer1.as_mut(), writer2.as_mut()).unwrap();
-    test_hasher::<ahash::AHasher>("ahash", rng.clone(), writer1.as_mut(), writer2.as_mut()).unwrap();
-    test_hasher::<seahash::SeaHasher>("seahash", rng.clone(), writer1.as_mut(), writer2.as_mut()).unwrap();
-    test_hasher::<metrohash::MetroHash64>("metro64", rng.clone(), writer1.as_mut(), writer2.as_mut()).unwrap();
-    test_hasher::<metrohash::MetroHash128>("metro128", rng.clone(), writer1.as_mut(), writer2.as_mut()).unwrap();
-    test_hasher::<rustc_hash::FxHasher>("fxhash", rng.clone(), writer1.as_mut(), writer2.as_mut()).unwrap();
-    test_hasher::<wyhash::WyHash>("wyhash", rng.clone(), writer1.as_mut(), writer2.as_mut()).unwrap();
-    test_hasher::<wyhash2::WyHash>("wyhash2", rng.clone(), writer1.as_mut(), writer2.as_mut()).unwrap();
-    test_hasher::<xxhash_rust::xxh64::Xxh64>("xxhash64", rng.clone(), writer1.as_mut(), writer2.as_mut()).unwrap();
-    test_hasher::<highway::HighwayHasher>("highway", rng.clone(), writer1.as_mut(), writer2.as_mut()).unwrap();
-    test_hasher::<fasthash::T1haHasher>("t1ha", rng.clone(), writer1.as_mut(), writer2.as_mut()).unwrap();
-    test_hasher::<fnv::FnvHasher>("fnv", rng.clone(), writer1.as_mut(), writer2.as_mut()).unwrap();
+    test_hasher::<siphasher::sip::SipHasher13>("sip13", rng.clone(),
+        writer1.as_mut(), writer2.as_mut(), writer3.as_mut()).unwrap();
+    test_hasher::<siphasher::sip::SipHasher24>("sip24", rng.clone(),
+        writer1.as_mut(), writer2.as_mut(), writer3.as_mut()).unwrap();
+    test_hasher::<ahash::AHasher>("ahash", rng.clone(),
+        writer1.as_mut(), writer2.as_mut(), writer3.as_mut()).unwrap();
+    test_hasher::<seahash::SeaHasher>("seahash", rng.clone(),
+        writer1.as_mut(), writer2.as_mut(), writer3.as_mut()).unwrap();
+    test_hasher::<metrohash::MetroHash64>("metro64", rng.clone(),
+        writer1.as_mut(), writer2.as_mut(), writer3.as_mut()).unwrap();
+    test_hasher::<metrohash::MetroHash128>("metro128", rng.clone(),
+        writer1.as_mut(), writer2.as_mut(), writer3.as_mut()).unwrap();
+    test_hasher::<rustc_hash::FxHasher>("fxhash", rng.clone(),
+        writer1.as_mut(), writer2.as_mut(), writer3.as_mut()).unwrap();
+    test_hasher::<wyhash::WyHash>("wyhash", rng.clone(),
+        writer1.as_mut(), writer2.as_mut(), writer3.as_mut()).unwrap();
+    test_hasher::<wyhash2::WyHash>("wyhash2", rng.clone(),
+        writer1.as_mut(), writer2.as_mut(), writer3.as_mut()).unwrap();
+    test_hasher::<xxhash_rust::xxh64::Xxh64>("xxhash64", rng.clone(),
+        writer1.as_mut(), writer2.as_mut(), writer3.as_mut()).unwrap();
+    test_hasher::<highway::HighwayHasher>("highway", rng.clone(),
+        writer1.as_mut(), writer2.as_mut(), writer3.as_mut()).unwrap();
+    test_hasher::<fasthash::T1haHasher>("t1ha", rng.clone(),
+        writer1.as_mut(), writer2.as_mut(), writer3.as_mut()).unwrap();
+    test_hasher::<fnv::FnvHasher>("fnv", rng.clone(),
+        writer1.as_mut(), writer2.as_mut(), writer3.as_mut()).unwrap();
+    // test_hasher::<fasthash::murmur::Hasher32>("murmur32",
+    //     rng.clone(), writer1.as_mut(), writer2.as_mut(), writer3.as_mut()).unwrap();
+    test_hasher::<fasthash::murmur3::Hasher32>("murmur32",
+        rng.clone(), writer1.as_mut(), writer2.as_mut(), writer3.as_mut()).unwrap();
+    test_hasher::<fasthash::murmur2::Hasher64_x64>("murmur64",
+        rng.clone(), writer1.as_mut(), writer2.as_mut(), writer3.as_mut()).unwrap();
 }
