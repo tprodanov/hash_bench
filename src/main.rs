@@ -116,7 +116,7 @@ where H: Hasher + Default,
     let timer = Instant::now();
     let mut buffer = vec![0; length];
     let mut bytes = generate_bytes(rng);
-    let mut matches_count = [0_u64; 64];
+    let mut matches_count = [0_u64; 65];
     for _ in 0..count {
         buffer.iter_mut().for_each(|b| *b = bytes.next().unwrap());
         let hash0 = calc::<H>(&buffer);
@@ -128,14 +128,14 @@ where H: Hasher + Default,
             matches_count[(hash0 ^ hash).count_ones() as usize] += 1;
         }
     }
-    // Best number should be 0.5.
-    let randomness = matches_count.into_iter().enumerate()
+    let average_change = matches_count.into_iter().enumerate()
         .map(|(i, c)| (i as u64 * c) as f64)
         .sum::<f64>()
-        / (length * count * 64) as f64;
-    let randomness01 = 1.0 - (2.0 * randomness - 1.0).abs();
-    writeln!(writer, "{}\t{}\t{:.10}", name, length, randomness01)?;
-    eprintln!("    -> {:.2} s, randomness {:.5}", timer.elapsed().as_secs_f64(), randomness01);
+        / (length * count) as f64;
+    let randomness01 = 1.0 - (average_change / 32.0 - 1.0).abs();
+    writeln!(writer, "{}\t{}\t{:.7}\t{:.10}", name, length, average_change, randomness01)?;
+    eprintln!("    -> {:.2} s, {:.3} bits changed on average, randomness {:.5}", timer.elapsed().as_secs_f64(),
+        average_change, randomness01);
     Ok(())
 }
 
@@ -156,9 +156,12 @@ where H: Hasher + Default,
         evaluate::<H>(name, 16, 2_usize.pow(18), ITERS, writer1)?;
         evaluate::<H>(name, 32, 2_usize.pow(17), ITERS, writer1)?;
         evaluate::<H>(name, 64, 2_usize.pow(16), ITERS, writer1)?;
-        evaluate::<H>(name, 128, 2_usize.pow(15), ITERS, writer1)?;
-        evaluate::<H>(name, 512, 2_usize.pow(14), ITERS, writer1)?;
+        evaluate::<H>(name, 128, 2_usize.pow(16), ITERS, writer1)?;
+        evaluate::<H>(name, 256, 2_usize.pow(15), ITERS, writer1)?;
+        evaluate::<H>(name, 512, 2_usize.pow(15), ITERS, writer1)?;
         evaluate::<H>(name, 1024, 2_usize.pow(14), ITERS, writer1)?;
+        evaluate::<H>(name, 2048, 2_usize.pow(14), ITERS, writer1)?;
+        evaluate::<H>(name, 4096, 2_usize.pow(14), ITERS, writer1)?;
     }
 
     if let Some(writer2) = writer2 {
@@ -172,7 +175,7 @@ where H: Hasher + Default,
     }
 
     if let Some(writer3) = writer3 {
-        let count = 2_usize.pow(20);
+        let count = 2_usize.pow(22);
         for &size in &[8, 12, 16, 20, 24, 28, 32] {
             test_randomness::<H>(name, &mut rng, count, size, writer3)?;
         }
@@ -207,7 +210,7 @@ fn main() {
     };
     let mut writer3 = if calc_randomness {
         let mut writer = io::BufWriter::new(fs::File::create(out_dir.join("randomness.csv")).unwrap());
-        writeln!(writer, "hasher\tbytes\trandomness").unwrap();
+        writeln!(writer, "hasher\tbytes\tchanged_bits\trandomness").unwrap();
         Some(writer)
     } else {
         None
@@ -240,10 +243,14 @@ fn main() {
         writer1.as_mut(), writer2.as_mut(), writer3.as_mut()).unwrap();
     test_hasher::<fnv::FnvHasher>("fnv", rng.clone(),
         writer1.as_mut(), writer2.as_mut(), writer3.as_mut()).unwrap();
-    // test_hasher::<fasthash::murmur::Hasher32>("murmur32",
-    //     rng.clone(), writer1.as_mut(), writer2.as_mut(), writer3.as_mut()).unwrap();
-    test_hasher::<fasthash::murmur3::Hasher32>("murmur32",
+    test_hasher::<fasthash::murmur2::Hasher64_x64>("murmur2",
         rng.clone(), writer1.as_mut(), writer2.as_mut(), writer3.as_mut()).unwrap();
-    test_hasher::<fasthash::murmur2::Hasher64_x64>("murmur64",
+    test_hasher::<fasthash::murmur3::Hasher128_x64>("murmur3",
+            rng.clone(), writer1.as_mut(), writer2.as_mut(), writer3.as_mut()).unwrap();
+    test_hasher::<fasthash::CityHasher>("city",
+        rng.clone(), writer1.as_mut(), writer2.as_mut(), writer3.as_mut()).unwrap();
+    test_hasher::<fasthash::SpookyHasher>("spooky",
+        rng.clone(), writer1.as_mut(), writer2.as_mut(), writer3.as_mut()).unwrap();
+    test_hasher::<fasthash::FarmHasher>("farm",
         rng.clone(), writer1.as_mut(), writer2.as_mut(), writer3.as_mut()).unwrap();
 }
