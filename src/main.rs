@@ -3,7 +3,6 @@ use std::{
     io::{self, Write},
     time::Instant,
     hash::Hasher,
-    collections::HashSet,
     path::Path,
     hint::black_box,
 };
@@ -90,9 +89,10 @@ where H: Hasher + Default,
     eprintln!("Testing {} for collisions, {}-string with variable range {:?}", name, length, affix_range);
     let timer = Instant::now();
     let mut buffer: Vec<_> = (0..length).map(|_| rng.sample(Alphanumeric)).collect();
+    assert!(count <= 16_usize.pow(affix_range.len() as u32));
 
     let mut collisions = 0;
-    let mut set: HashSet<u64, ahash::RandomState> = Default::default();
+    let mut set: std::collections::HashSet<u64, ahash::RandomState> = Default::default();
     for val in 0..count as u64 {
         fill_hex(buffer[affix_range.clone()].iter_mut().rev(), val);
         collisions += u64::from(!set.insert(calc::<H>(&buffer)));
@@ -165,12 +165,12 @@ where H: Hasher + Default,
     }
 
     if let Some(writer2) = writer2 {
-        let count = 2_usize.pow(22);
+        let count = 2_usize.pow(24);
         let affix = 6;
-        for &size in &[16, 20, 24, 28] {
-            test_collisions::<H>(name, &mut rng, count, size, 0..affix, writer2)?;
-            test_collisions::<H>(name, &mut rng, count, size, 8..8 + affix, writer2)?;
-            test_collisions::<H>(name, &mut rng, count, size, size - affix..size, writer2)?;
+        for size in (8..=32).step_by(2) {
+            // test_collisions::<H>(name, &mut rng, count, size, 0..affix, writer2)?;
+            // test_collisions::<H>(name, &mut rng, count, size, 8..8 + affix, writer2)?;
+            test_collisions::<H>(name, &mut rng, count, size + affix, size..size + affix, writer2)?;
         }
     }
 
